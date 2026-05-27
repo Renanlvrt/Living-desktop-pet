@@ -5,28 +5,25 @@ from PyQt5.QtCore import Qt, QTimer
 
 # ── Config ─────────────────────────────────────────
 SCALE        = 0.3
-GROUND_Y     = 800    # Y position pikachu walks along
+GROUND_Y     = 800
 WALK_SPEED   = 2
 CLIMB_SPEED  = 2
 FALL_SPEED   = 5
 BOB_RANGE    = 5
 TICK_MS      = 20
-RANDOM_SEED  = 42     # change this number to get different behaviour
+RANDOM_SEED  = 42
 
-# Idle: chance per tick to randomly stop
-IDLE_CHANCE  = 0.003  # 0.003 = ~0.3% per tick. raise for more stops
-IDLE_MIN_MS  = 2000   # min time stopped (ms)
-IDLE_MAX_MS  = 6000   # max time stopped (ms)
+IDLE_CHANCE  = 0.003
+IDLE_MIN_MS  = 2000
+IDLE_MAX_MS  = 6000
 
-# Sitting on top of a window
-SIT_CHANCE   = 0.5    # 50% chance to sit after climbing (vs walk off)
+SIT_CHANCE   = 0.5
 SIT_MIN_MS   = 3000
 SIT_MAX_MS   = 8000
 # ───────────────────────────────────────────────────
 
 rng = random.Random(RANDOM_SEED)
 
-# States
 WALKING  = "walking"
 IDLE     = "idle"
 CLIMBING = "climbing"
@@ -38,6 +35,7 @@ img_path   = os.path.join(script_dir, "pikachu.png")
 
 app = QApplication(sys.argv)
 screen_w = app.primaryScreen().geometry().width()
+screen_h = app.primaryScreen().geometry().height()
 
 label = QLabel()
 label.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
@@ -72,69 +70,127 @@ def pin_to_desktop(hwnd):
 
 pin_to_desktop(int(label.winId()))
 
-# ── Window obstacle detection (cached every 1s) ────
-_obstacle_cache   = []
-_obstacle_refresh = 0
-OBSTACLE_REFRESH  = 50  # ticks between refreshes
+# ── Window detection (every tick, no cache) ────────
 
-EXCLUDED_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Button",
-                    "DV2ControlHost", "MsgrIMEWindowClass", ""}
-
-def refresh_obstacles():
-    result = []
-    def cb(hwnd, _):
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        if win32gui.GetClassName(hwnd) in EXCLUDED_CLASSES:
-            return
-        try:
-            l, t, r, b = win32gui.GetWindowRect(hwnd)
-        except:
-            return
-        if (r - l) < 150 or (b - t) < 80:
-            return
-        if b < 0 or r < 0 or l > screen_w:
-            return
-        result.append((l, t, r, b))
-    win32gui.EnumWindows(cb, None)
-    return result
+# These window classes mean "the desktop is in focus, no real app open"
+DESKTOP_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Button",
+                   "DV2ControlHost", "MsgrIMEWindowClass", ""}
 
 def get_obstacles():
-    global _obstacle_cache, _obstacle_refresh
-    _obstacle_refresh -= 1
-    if _obstacle_refresh <= 0:
-        _obstacle_cache   = refresh_obstacles()
-        _obstacle_refresh = OBSTACLE_REFRESH
-    return _obstacle_cache
+    # Only the uppermost focused window counts as an obstacle
+    fg = win32gui.GetForegroundWindow()
+    if not fg:
+        return []
+
+    fg_class = win32gui.GetClassName(fg)
+
+    # Foreground is the desktop or taskbar — no real window is active
+    if fg_class in DESKTOP_CLASSES:
+        return []
+
+    # Foreground is a real app — use only its rect
+    try:
+        l, t, r, b = win32gui.GetWindowRect(fg)
+    except:
+        return []
+
+    # Ignore if minimised or off-screen
+    if (r - l) < 150 or (b - t) < 80:
+        return []
+    if b < 0 or r < 0 or l > screen_w:
+        return []
+
+    return [(l, t, r, b)]
 
 # ── Movement state ─────────────────────────────────
-x             = 100.0
-y             = float(GROUND_Y)
-direction     = 1
-bob           = 0
-bob_dir       = 1
-state         = WALKING
-idle_ticks    = 0
-sit_ticks     = 0
-climb_target  = 0.0
-current_win   = None  # window being climbed
+x                = 100.0
+y                = float(GROUND_Y)
+direction        = 1
+bob              = 0
+bob_dir          = 1
+state            = WALKING
+idle_ticks       = 0
+sit_ticks        = 0
+climb_target     = 0.0
+current_win      = None
+off_screen_ticks = 0
+MAX_OFF_SCREEN   = 3000 // TICK_MS  # 3 seconds
 
-def tick():
-    global x, y, direction, bob, bob_dir, state
-    global idle_ticks, sit_ticks, climb_target, current_win
+def resolve_push(obstacles):
+    """
+    Runs every tick regardless of state.
+    If any window is overlapping Pikachu right now, push him out
+    to the nearest free side immediately.
+    """
+    global x, y, direction
 
     pw = base_pixmap.width()
     ph = base_pixmap.height()
 
-    # Bob
+    for wl, wt, wr, wb in obstacles:
+        # Check if Pikachu's rect overlaps this window
+        overlapping = (x < wr and x + pw > wl and y < wb and y + ph > wt)
+        if not overlapping:
+            continue
+
+        # How deep is the overlap on each side
+        push_right = wr - x          # push pikachu to the right of window
+        push_left  = (x + pw) - wl   # push pikachu to the left of window
+        push_down  = wb - y           # push pikachu downward
+        push_up    = (y + ph) - wt   # push pikachu upward
+
+        # Pick the shallowest push direction
+        min_push = min(push_right, push_left, push_up, push_down)
+
+        if min_push == push_left:
+            x = float(wl - pw)
+            direction = -1
+            label.setPixmap(flipped_pixmap)
+        elif min_push == push_right:
+            x = float(wr)
+            direction = 1
+            label.setPixmap(base_pixmap)
+        elif min_push == push_up:
+            y = float(wt - ph)
+        elif min_push == push_down:
+            y = float(wb)
+
+def tick():
+    global x, y, direction, bob, bob_dir, state
+    global idle_ticks, sit_ticks, climb_target, current_win, off_screen_ticks
+
+    pw = base_pixmap.width()
+    ph = base_pixmap.height()
+
+    # Bob always runs
     bob += bob_dir
     if abs(bob) >= BOB_RANGE:
         bob_dir *= -1
 
+    # Fetch fresh window list every tick for real-time push
+    obstacles = get_obstacles()
+
+    # ── Off-screen guard ──────────────────────────
+    # If pushed outside screen bounds, count ticks and snap back after 3s
+    is_off_screen = (x + pw < 0 or x > screen_w or
+                     y + ph < 0 or y > screen_h)
+
+    if is_off_screen:
+        off_screen_ticks += 1
+        if off_screen_ticks >= MAX_OFF_SCREEN:
+            # Snap back to nearest screen edge and resume walking
+            x = max(0.0, min(x, float(screen_w - pw)))
+            y = float(GROUND_Y)
+            state            = WALKING
+            off_screen_ticks = 0
+    else:
+        off_screen_ticks = 0
+
+    # ── Push resolution (always, every tick) ──────
+    resolve_push(obstacles)
+
     # ── WALKING ───────────────────────────────────
     if state == WALKING:
-
-        # Random idle chance
         if rng.random() < IDLE_CHANCE:
             state = IDLE
             idle_ticks = rng.randint(IDLE_MIN_MS, IDLE_MAX_MS) // TICK_MS
@@ -153,61 +209,45 @@ def tick():
             direction = 1
             label.setPixmap(base_pixmap)
 
-        # Window collision check
-        for win in get_obstacles():
-            wl, wt, wr, wb = win
-
-            # Only care about windows whose bottom is near ground level
+        # Window wall — decide reaction
+        for wl, wt, wr, wb in obstacles:
             if wb < y - 20 or wt > y + ph:
                 continue
-
             hit = False
             if direction == 1  and (x + pw) >= wl and (x + pw) <= wl + WALK_SPEED + 4:
                 hit = True
             elif direction == -1 and x <= wr and x >= wr - WALK_SPEED - 4:
                 hit = True
-
             if hit:
                 roll = rng.random()
                 if roll < 0.40:
-                    # Climb up the wall
                     state        = CLIMBING
-                    current_win  = win
+                    current_win  = (wl, wt, wr, wb)
                     climb_target = float(wt - ph)
                     x = float(wl - pw) if direction == 1 else float(wr)
                 elif roll < 0.80:
-                    # Turn around
                     direction *= -1
                     label.setPixmap(base_pixmap if direction == 1 else flipped_pixmap)
-                # else 20%: ignore and walk through
                 break
 
-    # ── IDLE ──────────────────────────────────────
     elif state == IDLE:
         idle_ticks -= 1
         if idle_ticks <= 0:
             state = WALKING
 
-    # ── CLIMBING ──────────────────────────────────
     elif state == CLIMBING:
         y -= CLIMB_SPEED
         if y <= climb_target:
             y = climb_target
-            if rng.random() < SIT_CHANCE:
-                # Sit on top for a while
-                state     = SITTING
+            state = SITTING if rng.random() < SIT_CHANCE else FALLING
+            if state == SITTING:
                 sit_ticks = rng.randint(SIT_MIN_MS, SIT_MAX_MS) // TICK_MS
-            else:
-                # Skip sitting, fall straight back down
-                state = FALLING
 
-    # ── SITTING ───────────────────────────────────
     elif state == SITTING:
         sit_ticks -= 1
         if sit_ticks <= 0:
             state = FALLING
 
-    # ── FALLING ───────────────────────────────────
     elif state == FALLING:
         y += FALL_SPEED
         if y >= GROUND_Y:
@@ -220,7 +260,6 @@ timer = QTimer()
 timer.timeout.connect(tick)
 timer.start(TICK_MS)
 
-# Right-click to close
 def contextMenuEvent(e):
     from PyQt5.QtWidgets import QMenu
     menu = QMenu()
