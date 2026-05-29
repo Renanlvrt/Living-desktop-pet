@@ -1,4 +1,4 @@
-import sys, os, ctypes, win32gui, win32con, random, threading, textwrap
+import sys, os, ctypes, win32gui, win32con, random, threading, textwrap, re
 import requests
 from PyQt5.QtWidgets import QApplication, QLabel
 from PyQt5.QtGui import QPixmap, QTransform, QFont
@@ -6,33 +6,33 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 
 # ── Config ─────────────────────────────────────────
 SCALE        = 0.3
-GROUND_Y     = 800
-WALK_SPEED   = 2
-CLIMB_SPEED  = 2
-FALL_SPEED   = 5
-BOB_RANGE    = 5
 TICK_MS      = 20
 RANDOM_SEED  = 42
 
-IDLE_CHANCE      = 0.003
-IDLE_MIN_MS      = 2000
-IDLE_MAX_MS      = 6000
-SIT_CHANCE       = 0.5
-SIT_MIN_MS       = 3000
-SIT_MAX_MS       = 8000
+SPEED        = 2.0          # normal roaming speed (px/tick)
+ESCAPE_SPEED = 5.0          # speed when escaping window coverage
 
-OLLAMA_MODEL     = "tinyllama"
-OLLAMA_URL       = "http://localhost:11434/api/generate"
-BUBBLE_SHOW_MS   = 6000
-IDLE_TALK_TICKS  = 150
+BOB_RANGE    = 5            # px up/down for idle bob
+
+IDLE_CHANCE     = 0.002     # probability per tick of randomly pausing
+IDLE_MIN_MS     = 1500
+IDLE_MAX_MS     = 5000
+IDLE_TALK_TICKS = 200       # ticks idle before he says something
+
+DIR_MIN_TICKS   = 60        # ticks before direction can change
+DIR_MAX_TICKS   = 250
+
+OLLAMA_MODEL    = "tinyllama"
+OLLAMA_URL      = "http://localhost:11434/api/generate"
+BUBBLE_SHOW_MS  = 7000
+TYPE_SPEED      = 2         # ticks between typewriter characters
 # ───────────────────────────────────────────────────
 
 rng = random.Random(RANDOM_SEED)
-WALKING  = "walking"
+
+ROAMING  = "roaming"
 IDLE     = "idle"
-CLIMBING = "climbing"
-SITTING  = "sitting"
-FALLING  = "falling"
+ESCAPING = "escaping"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 img_path   = os.path.join(script_dir, "pikachu.png")
@@ -57,39 +57,38 @@ if SCALE != 1.0:
 flipped_pixmap = base_pixmap.transformed(QTransform().scale(-1, 1))
 label.setPixmap(base_pixmap)
 label.resize(base_pixmap.size())
-label.move(100, GROUND_Y)
+label.move(100, screen_h // 2)
 label.show()
 
 # ── Speech bubble ──────────────────────────────────
 bubble = QLabel()
 bubble.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
 bubble.setWordWrap(True)
-bubble.setFont(QFont("Arial", 9, QFont.Bold))
+bubble.setFont(QFont("Courier New", 9, QFont.Bold))
 bubble.setStyleSheet("""
     QLabel {
-        background-color: white;
-        border: 2px solid black;
-        border-radius: 8px;
-        padding: 6px 8px;
-        color: black;
+        background-color: #fdf6e3;
+        border: 2px solid #2b2b2b;
+        border-radius: 2px;
+        padding: 7px 10px;
+        color: #1a1a1a;
+        letter-spacing: 1px;
     }
 """)
-bubble.setMaximumWidth(200)
+bubble.setMaximumWidth(180)
 bubble.hide()
 
 bubble_ticks    = 0
 llm_busy        = False
 idle_talk_count = 0
+_type_full      = ""
+_type_index     = 0
+_type_delay     = 0
 
-# ── Z-order management ─────────────────────────────
-# Normally: parent Pikachu to WorkerW so he lives in the desktop background
-# Fullscreen exception: un-parent + HWND_TOPMOST so he appears above fullscreen
-
-_hwnd        = int(label.winId())
-_workerw     = None
-_is_topmost  = False
-_zorder_tick = 0
-ZORDER_EVERY = 25
+# ── Z-order ────────────────────────────────────────
+_hwnd       = int(label.winId())
+_workerw    = None
+_is_topmost = False
 
 def find_workerw():
     global _workerw
@@ -120,11 +119,12 @@ def go_to_foreground():
 find_workerw()
 go_to_background()
 
+# ── Window detection ───────────────────────────────
 DESKTOP_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Button",
                    "DV2ControlHost", "MsgrIMEWindowClass", ""}
 
 def get_foreground_info():
-    """Returns (rect_or_None, is_fullscreen) for the current foreground window."""
+    """Returns (rect | None, is_fullscreen)."""
     fg = win32gui.GetForegroundWindow()
     if not fg or win32gui.GetClassName(fg) in DESKTOP_CLASSES:
         return None, False
@@ -132,18 +132,10 @@ def get_foreground_info():
         l, t, r, b = win32gui.GetWindowRect(fg)
     except:
         return None, False
-    if (r - l) < 150 or (b - t) < 80:
-        return None, False
-    if b < 0 or r < 0 or l > screen_w:
+    if (r - l) < 150 or (b - t) < 80 or b < 0 or r < 0 or l > screen_w:
         return None, False
     fullscreen = (l <= 0 and t <= 0 and r >= screen_w and b >= screen_h)
     return (l, t, r, b), fullscreen
-
-def get_obstacles():
-    rect, fullscreen = get_foreground_info()
-    if fullscreen or rect is None:
-        return []
-    return [rect]
 
 # ── LLM ───────────────────────────────────────────
 class LLMSignal(QObject):
@@ -163,14 +155,18 @@ def ask_llm(context):
                 "model": OLLAMA_MODEL,
                 "prompt": (
                     "You are Pikachu, a tiny cute Pokemon living on someone's desktop. "
-                    "Reply in ONE short sentence (max 12 words). Stay in character. "
-                    "Be energetic, cute and expressive. "
+                    "RULES: max 10 words total. Max 1 emoji (optional). No hashtags. "
+                    "No punctuation other than ! or ?. Cute and expressive. "
                     f"Situation: {context}"
                 ),
                 "stream": False
             }, timeout=15)
             text = resp.json().get("response", "Pika pika!").strip()
-            text = text.split(".")[0].split("!")[0].split("?")[0] + "!"
+            text = re.sub(r'#\w+', '', text).strip()
+            words = text.split()[:10]
+            text = " ".join(words)
+            if not text.endswith(("!", "?")):
+                text += "!"
         except Exception:
             text = "Pika pika!"
         llm_busy = False
@@ -178,208 +174,228 @@ def ask_llm(context):
     threading.Thread(target=run, daemon=True).start()
 
 def show_bubble(text):
-    global bubble_ticks
-    wrapped = textwrap.fill(text, width=28)
-    bubble.setText(wrapped)
+    global bubble_ticks, _type_full, _type_index, _type_delay
+    _type_full  = text
+    _type_index = 0
+    _type_delay = 0
+    bubble.setText("")
     bubble.adjustSize()
-    bx = int(x) + base_pixmap.width() // 2 - bubble.width() // 2
-    by = int(y) - bubble.height() - 8
-    bx = max(0, min(bx, screen_w - bubble.width()))
-    by = max(0, by)
-    bubble.move(bx, by)
+    _reposition_bubble()
     bubble.show()
     bubble_ticks = BUBBLE_SHOW_MS // TICK_MS
 
+def _reposition_bubble():
+    pw = base_pixmap.width()
+    bx = int(x) + pw // 2 - bubble.width() // 2
+    by = int(y) - bubble.height() - 8
+    bubble.move(max(0, min(bx, screen_w - bubble.width())), max(0, by))
+
 llm_signal.response_ready.connect(show_bubble)
 
+# ── Movement helpers ───────────────────────────────
+pw = base_pixmap.width()
+ph = base_pixmap.height()
+
+def clamp_to_screen(nx, ny):
+    """Hard clamp — Pikachu can never leave screen bounds."""
+    nx = max(0.0, min(nx, float(screen_w - pw)))
+    ny = max(0.0, min(ny, float(screen_h - ph)))
+    return nx, ny
+
+def is_covered(rect):
+    """True if Pikachu's rect overlaps the window rect."""
+    if rect is None:
+        return False
+    wl, wt, wr, wb = rect
+    return x < wr and x + pw > wl and y < wb and y + ph > wt
+
+def escape_vector(rect):
+    """
+    Returns (evx, evy) — the direction that gets Pikachu
+    out of the window overlap in the fewest pixels.
+    Vertical boundaries → push left/right.
+    Horizontal boundaries → push up/down.
+    """
+    wl, wt, wr, wb = rect
+    d_left  = (x + pw) - wl   # cost to exit via left wall
+    d_right = wr - x           # cost to exit via right wall
+    d_up    = (y + ph) - wt   # cost to exit via top wall
+    d_down  = wb - y           # cost to exit via bottom wall
+
+    # Respect screen edges: don't escape toward a wall we're already against
+    if x <= 0:            d_left  = float("inf")
+    if x + pw >= screen_w: d_right = float("inf")
+    if y <= 0:            d_up    = float("inf")
+    if y + ph >= screen_h: d_down  = float("inf")
+
+    min_d = min(d_left, d_right, d_up, d_down)
+
+    if min_d == d_left:   return (-ESCAPE_SPEED, 0.0)
+    if min_d == d_right:  return ( ESCAPE_SPEED, 0.0)
+    if min_d == d_up:     return (0.0, -ESCAPE_SPEED)
+    return                       (0.0,  ESCAPE_SPEED)
+
+def pick_direction():
+    """Pick a random non-zero 2D direction and reset direction timer."""
+    global vx, vy, dir_ticks
+    choices = [-SPEED, 0.0, SPEED]
+    while True:
+        nvx = rng.choice(choices)
+        nvy = rng.choice(choices)
+        if nvx != 0 or nvy != 0:
+            break
+    vx = nvx
+    vy = nvy
+    dir_ticks = rng.randint(DIR_MIN_TICKS, DIR_MAX_TICKS)
+    if vx > 0:  label.setPixmap(base_pixmap)
+    elif vx < 0: label.setPixmap(flipped_pixmap)
+
 # ── Movement state ─────────────────────────────────
-x                = 100.0
-y                = float(GROUND_Y)
-direction        = 1
-bob              = 0
-bob_dir          = 1
-state            = WALKING
+x         = 100.0
+y         = float(screen_h // 2)
+vx        = SPEED
+vy        = 0.0
+bob       = 0
+bob_dir   = 1
+state     = ROAMING
 idle_ticks       = 0
-sit_ticks        = 0
-climb_target     = 0.0
-current_win      = None
-off_screen_ticks = 0
-MAX_OFF_SCREEN   = 3000 // TICK_MS
+idle_talk_count  = 0
+dir_ticks        = rng.randint(DIR_MIN_TICKS, DIR_MAX_TICKS)
+prev_win         = None   # last known window rect (for tab-switch detection)
 
-def resolve_push(obstacles):
-    global x, y, direction, state
-    pw = base_pixmap.width()
-    ph = base_pixmap.height()
-    
-    for wl, wt, wr, wb in obstacles:
-        # GOAL 1 & 4: Detect bounding boxes of topmost tab
-        if not (x < wr and x + pw > wl and y < wb and y + ph > wt):
-            continue
-            
-        push_right = wr - x
-        push_left  = (x + pw) - wl
-        push_down  = wb - y
-        push_up    = (y + ph) - wt
-        
-        # Calculate the absolute shortest path to safety
-        min_push   = min(push_right, push_left, push_up, push_down)
-
-        # GOAL 5 & 6: Uncovered at all times / Shortest path recovery
-        # If covered by more than 30 pixels, he immediately dashes out 
-        # using left/right walking or up/down climbing logic.
-        if min_push > 30:
-            ESCAPE_SPEED = 15 
-            if min_push == push_left:
-                x -= ESCAPE_SPEED; direction = -1; label.setPixmap(flipped_pixmap)
-            elif min_push == push_right:
-                x += ESCAPE_SPEED; direction = 1;  label.setPixmap(base_pixmap)
-            elif min_push == push_up:
-                y -= ESCAPE_SPEED  # Recovers by climbing up
-            elif min_push == push_down:
-                y += ESCAPE_SPEED  # Recovers by climbing down
-            return # Exit so we can see him dash out naturally
-            
-        # GOAL 2: Affected by boundaries (Pushed left/right and up/down)
-        if min_push == push_left:
-            x = float(wl - pw); direction = -1; label.setPixmap(flipped_pixmap)
-        elif min_push == push_right:
-            x = float(wr);      direction = 1;  label.setPixmap(base_pixmap)
-        elif min_push == push_up:
-            y = float(wt - ph)
-        elif min_push == push_down:
-            y = float(wb)
-
+# ── Main tick ─────────────────────────────────────
 def tick():
-    global x, y, direction, bob, bob_dir, state
-    global idle_ticks, sit_ticks, climb_target, current_win
-    global off_screen_ticks, bubble_ticks, idle_talk_count, _zorder_tick
-
-    pw = base_pixmap.width()
-    ph = base_pixmap.height()
+    global x, y, vx, vy, bob, bob_dir, state
+    global idle_ticks, idle_talk_count, dir_ticks, prev_win
+    global bubble_ticks, _type_full, _type_index, _type_delay
 
     # Bob
     bob += bob_dir
     if abs(bob) >= BOB_RANGE:
         bob_dir *= -1
 
-    # ── Z-order: check fullscreen every tick ───────
-    _, fullscreen = get_foreground_info()
+    # ── Fullscreen / z-order ──────────────────────
+    rect, fullscreen = get_foreground_info()
     if fullscreen and not _is_topmost:
-        go_to_foreground()   # fullscreen → pop on top
+        go_to_foreground()
     elif not fullscreen and _is_topmost:
-        go_to_background()   # fullscreen gone → back to desktop layer
+        go_to_background()
 
-    obstacles = get_obstacles()
+    # ── Tab-switch detection ──────────────────────
+    # If topmost window changed and Pikachu is now covered → escape immediately
+    if rect != prev_win:
+        prev_win = rect
+        if not fullscreen and is_covered(rect):
+            state = ESCAPING
 
-    # ── Off-screen guard (always get back within 3s) ──
-    is_off = x + pw < 0 or x > screen_w or y + ph < 0 or y > screen_h
-    if is_off:
-        off_screen_ticks += 1
-        if off_screen_ticks >= MAX_OFF_SCREEN:
-            x = max(0.0, min(x, float(screen_w - pw)))
-            y = float(GROUND_Y)
-            state = WALKING
-            off_screen_ticks = 0
-    else:
-        off_screen_ticks = 0
-
-    resolve_push(obstacles)
-
-    # ── STRICT VERTICAL BOUNDARIES ──
-    # Prevent Pikachu from being pushed off the top or bottom of the screen.
-    # Left and right (X-axis) remain unrestricted here.
-    if y < 0:
-        y = 0.0
-    elif y > GROUND_Y:
-        y = float(GROUND_Y)
-    # ────────────────────────────────
-
-    # GOAL 4: Keeps updating location/size of topmost active tab
-    obstacles = get_obstacles()
-    resolve_push(obstacles)
-
-    # GOAL 3: Cannot leave screen through top/bottom boundaries
-    if y < 0:
-        y = 0.0
-    elif y > GROUND_Y:
-        y = float(GROUND_Y)
-
-    # Bubble: countdown and follow Pikachu
+    # ── Bubble: typewriter + follow ───────────────
     if bubble_ticks > 0:
         bubble_ticks -= 1
-        bx = int(x) + pw // 2 - bubble.width() // 2
-        by = int(y) - bubble.height() - 8
-        bubble.move(max(0, min(bx, screen_w - bubble.width())), max(0, by))
+        # Typewriter: reveal one character at a time
+        if _type_index < len(_type_full):
+            _type_delay -= 1
+            if _type_delay <= 0:
+                _type_index += 1
+                bubble.setText(_type_full[:_type_index] + ("_" if _type_index < len(_type_full) else ""))
+                bubble.adjustSize()
+                _type_delay = TYPE_SPEED
+        else:
+            bubble.setText(_type_full)   # done typing, remove cursor
+        _reposition_bubble()
         if bubble_ticks == 0:
             bubble.hide()
 
-    # ── WALKING ───────────────────────────────────
-    if state == WALKING:
+    # ── Skip movement logic when fullscreen ───────
+    # (Pikachu roams freely on top, no window obstacles)
+    if fullscreen:
+        _move_freely()
+        label.move(int(x), int(y + bob))
+        return
+
+    # ── ROAMING ───────────────────────────────────
+    if state == ROAMING:
         idle_talk_count = 0
+
+        # Random pause
         if rng.random() < IDLE_CHANCE:
             state = IDLE
             idle_ticks = rng.randint(IDLE_MIN_MS, IDLE_MAX_MS) // TICK_MS
             label.move(int(x), int(y + bob))
             return
 
-        x += WALK_SPEED * direction
-        if x + pw >= screen_w:
-            x = float(screen_w - pw); direction = -1; label.setPixmap(flipped_pixmap)
-        elif x <= 0:
-            x = 0.0; direction = 1; label.setPixmap(base_pixmap)
+        _move_freely()
 
-        for wl, wt, wr, wb in obstacles:
-            if wb < y - 20 or wt > y + ph:
-                continue
-            hit = (direction == 1  and (x + pw) >= wl and (x + pw) <= wl + WALK_SPEED + 4) or \
-                  (direction == -1 and x <= wr and x >= wr - WALK_SPEED - 4)
-            if hit:
-                roll = rng.random()
-                if roll < 0.40:
-                    state = CLIMBING; current_win = (wl, wt, wr, wb)
-                    climb_target = float(wt - ph)
-                    x = float(wl - pw) if direction == 1 else float(wr)
-                    ask_llm("I just started climbing up the side of a window!")
-                elif roll < 0.80:
-                    direction *= -1
-                    label.setPixmap(base_pixmap if direction == 1 else flipped_pixmap)
-                break
+        # If movement landed inside window → escape
+        if is_covered(rect):
+            state = ESCAPING
 
+    # ── IDLE ──────────────────────────────────────
     elif state == IDLE:
         idle_talk_count += 1
         if idle_talk_count == IDLE_TALK_TICKS:
-            ask_llm("I have been standing still on the desktop for a while, just chilling.")
+            ask_llm("I have been standing still for a while, just chilling.")
         idle_ticks -= 1
         if idle_ticks <= 0:
-            state = WALKING; idle_talk_count = 0
+            state = ROAMING
+            idle_talk_count = 0
+            pick_direction()
+        # Still escape if covered while idle
+        if is_covered(rect):
+            state = ESCAPING
 
-    elif state == CLIMBING:
-        y -= CLIMB_SPEED
-        if y <= climb_target:
-            y = climb_target
-            if rng.random() < SIT_CHANCE:
-                state = SITTING
-                sit_ticks = rng.randint(SIT_MIN_MS, SIT_MAX_MS) // TICK_MS
-                ask_llm("I just climbed to the top of a window and I am sitting up here!")
-            else:
-                state = FALLING
-
-    elif state == SITTING:
-        sit_ticks -= 1
-        if sit_ticks <= 0:
-            state = FALLING
-
-    elif state == FALLING:
-        y += FALL_SPEED
-        if y >= GROUND_Y:
-            y = float(GROUND_Y); state = WALKING
+    # ── ESCAPING ──────────────────────────────────
+    elif state == ESCAPING:
+        if not is_covered(rect):
+            # Free — resume roaming
+            state = ROAMING
+            pick_direction()
+            ask_llm("I just escaped from behind a window!")
+        else:
+            evx, evy = escape_vector(rect)
+            nx, ny = clamp_to_screen(x + evx, y + evy)
+            x, y = nx, ny
 
     label.move(int(x), int(y + bob))
 
+def _move_freely():
+    """Apply vx/vy with direction timer, screen edge bounce, and wall reaction."""
+    global x, y, vx, vy, dir_ticks
+
+    # Direction change countdown
+    dir_ticks -= 1
+    if dir_ticks <= 0:
+        pick_direction()
+
+    nx = x + vx
+    ny = y + vy
+
+    # Screen edges:
+    # Left/right → bounce (reverse horizontal)
+    # Top/bottom → hard clamp (cannot exit, bounce back)
+    if nx <= 0:
+        nx = 0.0
+        vx = abs(vx)
+        label.setPixmap(base_pixmap)
+    elif nx + pw >= screen_w:
+        nx = float(screen_w - pw)
+        vx = -abs(vx)
+        label.setPixmap(flipped_pixmap)
+
+    if ny <= 0:
+        ny = 0.0
+        vy = abs(vy)   # bounce downward
+    elif ny + ph >= screen_h:
+        ny = float(screen_h - ph)
+        vy = -abs(vy)  # bounce upward
+
+    x, y = nx, ny
+
+# ── Timer ──────────────────────────────────────────
 timer = QTimer()
 timer.timeout.connect(tick)
 timer.start(TICK_MS)
 
+# ── Click to talk ──────────────────────────────────
 def mousePressEvent(e):
     if e.button() == Qt.LeftButton:
         ask_llm("Someone just clicked on me! I am surprised and happy.")
