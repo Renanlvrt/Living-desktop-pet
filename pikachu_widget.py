@@ -308,7 +308,7 @@ def tick():
     # ── Skip movement logic when fullscreen ───────
     # (Pikachu roams freely on top, no window obstacles)
     if fullscreen:
-        _move_freely()
+        _move_freely()  # no rect — roam freely over fullscreen
         label.move(int(x), int(y + bob))
         return
 
@@ -323,7 +323,7 @@ def tick():
             label.move(int(x), int(y + bob))
             return
 
-        _move_freely()
+        _move_freely(rect)
 
         # If movement landed inside window → escape
         if is_covered(rect):
@@ -357,11 +357,10 @@ def tick():
 
     label.move(int(x), int(y + bob))
 
-def _move_freely():
-    """Apply vx/vy with direction timer, screen edge bounce, and wall reaction."""
+def _move_freely(rect=None):
+    """Apply vx/vy with direction timer, screen edge bounce, corner escape, window wall bounce."""
     global x, y, vx, vy, dir_ticks
 
-    # Direction change countdown
     dir_ticks -= 1
     if dir_ticks <= 0:
         pick_direction()
@@ -369,24 +368,50 @@ def _move_freely():
     nx = x + vx
     ny = y + vy
 
-    # Screen edges:
-    # Left/right → bounce (reverse horizontal)
-    # Top/bottom → hard clamp (cannot exit, bounce back)
+    # ── Screen edge bounce ────────────────────────
     if nx <= 0:
-        nx = 0.0
-        vx = abs(vx)
-        label.setPixmap(base_pixmap)
+        nx = 0.0;              vx =  abs(vx); label.setPixmap(base_pixmap)
     elif nx + pw >= screen_w:
-        nx = float(screen_w - pw)
-        vx = -abs(vx)
-        label.setPixmap(flipped_pixmap)
+        nx = float(screen_w - pw); vx = -abs(vx); label.setPixmap(flipped_pixmap)
 
     if ny <= 0:
-        ny = 0.0
-        vy = abs(vy)   # bounce downward
+        ny = 0.0;              vy =  abs(vy)
     elif ny + ph >= screen_h:
-        ny = float(screen_h - ph)
-        vy = -abs(vy)  # bounce upward
+        ny = float(screen_h - ph); vy = -abs(vy)
+
+    # ── Corner escape ─────────────────────────────
+    # If touching both a horizontal AND vertical edge, force direction away
+    at_h = (nx <= 0 or nx + pw >= screen_w)
+    at_v = (ny <= 0 or ny + ph >= screen_h)
+    if at_h and at_v:
+        vx = SPEED  if nx <= 0 else -SPEED
+        vy = SPEED  if ny <= 0 else -SPEED
+        # Short timer so he leaves quickly
+        dir_ticks = rng.randint(DIR_MIN_TICKS // 2, DIR_MIN_TICKS)
+        label.setPixmap(base_pixmap if vx > 0 else flipped_pixmap)
+
+    # ── Window wall bounce (non-fullscreen only) ──
+    # Proactively bounce off window edges before overlapping
+    if rect is not None:
+        wl, wt, wr, wb = rect
+        would_overlap = (nx < wr and nx + pw > wl and ny < wb and ny + ph > wt)
+        if would_overlap:
+            cur_x_in = (x < wr and x + pw > wl)
+            cur_y_in = (y < wb and y + ph > wt)
+            if not cur_x_in:
+                # Entering horizontally → bounce vx
+                vx = -vx
+                nx = x
+                label.setPixmap(base_pixmap if vx > 0 else flipped_pixmap)
+            elif not cur_y_in:
+                # Entering vertically → bounce vy
+                vy = -vy
+                ny = y
+            else:
+                # Already inside somehow → bounce both
+                vx = -vx; vy = -vy
+                nx = x;   ny = y
+                label.setPixmap(base_pixmap if vx > 0 else flipped_pixmap)
 
     x, y = nx, ny
 
