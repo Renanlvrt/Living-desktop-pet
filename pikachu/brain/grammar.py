@@ -38,6 +38,8 @@ CRITICAL RULES:
 - "spelling" scope is for typos/misspellings (e.g. mistekes -> mistakes).
 - "grammar" scope is for objective rules (e.g. makes -> make).
 - "style" scope is for awkward phrasing.
+- The "error" field MUST contain ONLY the exact incorrect word or phrase from the text. Do not add any parenthetical comments, corrections, explanations, or notes (e.g. NEVER write "a lot" (should be "a lot of")).
+- The "corrected" field MUST contain ONLY the clean replacement word or phrase. Do not add explanations, notes, or commentary.
 - Output ONLY a valid JSON object. Do not include markdown code blocks (```json).
 
 Format:
@@ -239,6 +241,10 @@ class GrammarEngine:
                 cleaned = text[start_idx : end_idx + 1]
             else:
                 raise ValueError("No JSON object found in response.")
+
+            # Sanitize common Mistral JSON syntax issues (e.g. "a lot" (should be "a lot of") -> "a lot")
+            import re
+            cleaned = re.sub(r'("[^"]*")\s*\([^)]*\)', r'\1', cleaned)
 
             log.info("[DEBUG] Cleaned JSON payload extracted: %s", cleaned)
             data        = json.loads(cleaned)
