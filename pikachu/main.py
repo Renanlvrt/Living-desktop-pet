@@ -240,8 +240,7 @@ class PikachuApp:
         success = self._grammar.replace_text(correction)
         if success:
             log.info("Successfully applied text correction to Word document.")
-            # Force snapshot update to prevent re-triggering
-            self._grammar._last_text = self._grammar._reader.read_active_app(self._grammar._class_name)
+            # Allow the polling loop to naturally detect the update and request a re-review
         else:
             log.warning("Failed to apply text correction to Word document.")
         self._llm.ask_tiny("User corrected a grammar mistake")

@@ -83,6 +83,7 @@ class GrammarEngine:
         self._correction_index = 0
         self._high_gpu_ticks   = 0
         self._active_corrections = []
+        self._dismissed_signatures = set()
 
         # Wire up LLM response → our handler
         self._llm.signals.big_response_ready.connect(self._on_llm_response)
@@ -122,6 +123,7 @@ class GrammarEngine:
         # Clear highlights of all active corrections before unloading
         self._reader.clear_highlights_in_word(self._class_name, self._active_corrections)
         self._active_corrections = []
+        self._dismissed_signatures.clear()
         self._llm.unload_big_model()
         self.signals.status_changed.emit(False)
 
@@ -144,9 +146,22 @@ class GrammarEngine:
         )
 
     def dismiss_correction(self, correction):
-        """Dismiss a correction: clear its highlight and remove from active list."""
+        """Dismiss a correction: clear its highlight, add to dismissed signatures, and remove from active list."""
         self._reader.clear_highlights_in_word(self._class_name, [correction])
         self._active_corrections = [c for c in self._active_corrections if c.index != correction.index]
+        
+        # Track dismissed signature to filter out in subsequent checks
+        sig = (
+            correction.error.strip().lower(),
+            correction.corrected.strip().lower(),
+            self._normalize_text(correction.question)
+        )
+        self._dismissed_signatures.add(sig)
+        log.info("[DEBUG] Added correction to dismissed signatures: %s", sig)
+
+    def _normalize_text(self, text: str) -> str:
+        """Helper to strip non-alphanumeric chars and lowercase text for signature matching."""
+        return "".join(c.lower() for c in text if c.isalnum())
 
     # ── Internal: polling loop ────────────────────────────────────────────────
 
@@ -239,14 +254,26 @@ class GrammarEngine:
 
                 log.info("[DEBUG] Parsing correction element: Question=%r, Scope=%r, Error=%r, Corrected=%r", question, scope, error, corr)
                 if (error or question) and corr and error != corr:
-                    corrections.append(Correction(
+                    c = Correction(
                         question    = question,
                         scope       = scope,
                         error       = error,
                         corrected   = corr,
                         explanation = expl,
                         index       = self._correction_index,
-                    ))
+                    )
+                    
+                    # Filter out if already dismissed in this session
+                    sig = (
+                        c.error.strip().lower(),
+                        c.corrected.strip().lower(),
+                        self._normalize_text(c.question)
+                    )
+                    if sig in self._dismissed_signatures:
+                        log.info("[DEBUG] Filtering out dismissed correction: %s", sig)
+                        continue
+
+                    corrections.append(c)
                     log.info("[DEBUG] Created Correction (index=%d): %r", self._correction_index, corrections[-1])
                     self._correction_index += 1
                 else:

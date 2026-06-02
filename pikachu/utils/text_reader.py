@@ -122,6 +122,7 @@ class TextReader:
             import win32com.client
             word = win32com.client.GetActiveObject("Word.Application")
             doc  = word.ActiveDocument
+            log.info("[DEBUG] replace_text_in_active_app called: original=%r, corrected=%r, question=%r", original, corrected, question)
 
             # 1. Try to find the sentence context first to avoid wrong replacements
             if question:
@@ -135,41 +136,58 @@ class TextReader:
                 find_obj.MatchWholeWord = False
                 find_obj.MatchWildcards = False
 
+                log.info("[DEBUG] Searching for sentence context: %r", clean_q)
                 if find_obj.Execute():
+                    log.info("[DEBUG] Found sentence context range: [%d, %d] -> text: %r", find_range.Start, find_range.End, find_range.Text)
                     # If the sentence range was found, replace within that range
                     if original:
                         error_find = find_range.Find
                         error_find.ClearFormatting()
                         error_find.Text = original.strip()
                         error_find.MatchCase = True
+                        log.info("[DEBUG] Searching for error word %r within sentence context", original.strip())
                         if error_find.Execute():
+                            log.info("[DEBUG] Found error word match range: [%d, %d] -> text: %r", find_range.Start, find_range.End, find_range.Text)
+                            self._expand_to_word_boundaries(doc, find_range)
                             # Clear highlight of error range before replacement
                             find_range.HighlightColorIndex = 0 # wdNoHighlight
+                            old_text = find_range.Text
                             find_range.Text = corrected.strip()
                             find_range.HighlightColorIndex = 0 # Ensure replaced text is clean
-                            log.info("Successfully replaced '%s' with '%s' in Word sentence context.", original, corrected)
+                            log.info("Successfully replaced %r with %r (original error was %r) in Word sentence context.", old_text, corrected, original)
                             return True
+                        else:
+                            log.info("[DEBUG] Error word %r not found within sentence context.", original)
                     else:
                         # Style correction: replace the entire sentence range
+                        log.info("[DEBUG] Style correction: replacing entire sentence range")
                         find_range.HighlightColorIndex = 0 # wdNoHighlight
                         find_range.Text = corrected.strip()
                         find_range.HighlightColorIndex = 0
                         log.info("Successfully replaced entire sentence for style in Word.")
                         return True
+                else:
+                    log.info("[DEBUG] Sentence context %r not found in document.", clean_q)
 
             # 2. Global fallback search for the original word/phrase
             if original:
+                log.info("[DEBUG] Falling back to global search for error word: %r", original.strip())
                 global_range = doc.Content
                 global_find = global_range.Find
                 global_find.ClearFormatting()
                 global_find.Text = original.strip()
                 global_find.MatchCase = True
                 if global_find.Execute():
+                    log.info("[DEBUG] Found global error word match range: [%d, %d] -> text: %r", global_range.Start, global_range.End, global_range.Text)
+                    self._expand_to_word_boundaries(doc, global_range)
                     global_range.HighlightColorIndex = 0 # wdNoHighlight
+                    old_text = global_range.Text
                     global_range.Text = corrected.strip()
                     global_range.HighlightColorIndex = 0
-                    log.info("Successfully replaced '%s' with '%s' globally in Word.", original, corrected)
+                    log.info("Successfully replaced %r with %r (original error was %r) globally in Word.", old_text, corrected, original)
                     return True
+                else:
+                    log.info("[DEBUG] Global fallback search failed for: %r", original)
 
             log.warning("Could not locate text to replace in Word: original=%r, question=%r", original, question)
             return False
@@ -217,6 +235,7 @@ class TextReader:
         try:
             question = correction.question
             original = correction.error
+            log.info("[DEBUG] _set_correction_highlight called: original=%r, question=%r, color=%d", original, question, color_index)
             
             if question:
                 clean_q = question.strip().replace("\n", "\r")
@@ -236,10 +255,13 @@ class TextReader:
                         error_find.Text = original.strip()
                         error_find.MatchCase = True
                         if error_find.Execute():
+                            self._expand_to_word_boundaries(doc, find_range)
+                            log.info("[DEBUG] Highlighting range [%d, %d] -> text: %r with color index %d", find_range.Start, find_range.End, find_range.Text, color_index)
                             find_range.HighlightColorIndex = color_index
                             return True
                     else:
                         # Style correction: highlight the entire sentence range
+                        log.info("[DEBUG] Highlighting entire style sentence range [%d, %d] -> text: %r with color index %d", find_range.Start, find_range.End, find_range.Text, color_index)
                         find_range.HighlightColorIndex = color_index
                         return True
 
@@ -251,6 +273,8 @@ class TextReader:
                 global_find.Text = original.strip()
                 global_find.MatchCase = True
                 if global_find.Execute():
+                    self._expand_to_word_boundaries(doc, global_range)
+                    log.info("[DEBUG] Highlighting global fallback range [%d, %d] -> text: %r with color index %d", global_range.Start, global_range.End, global_range.Text, color_index)
                     global_range.HighlightColorIndex = color_index
                     return True
 
@@ -258,4 +282,56 @@ class TextReader:
         except Exception as e:
             log.debug("_set_correction_highlight failed: %s", e)
             return False
+
+    def _expand_to_word_boundaries(self, doc, find_range) -> None:
+        """
+        Expands the given find_range to cover full word boundaries (alphanumeric + apostrophes).
+        This avoids partial/substring highlighting or replacement issues (e.g. SEN -> Sentencetence).
+        """
+        try:
+            start = find_range.Start
+            end = find_range.End
+            log.info("[DEBUG] _expand_to_word_boundaries starting range: [%d, %d] -> text: %r", start, end, find_range.Text)
+            
+            def is_word_char(c: str) -> bool:
+                return c.isalnum() or c in ("'", "’")
+
+            # Check character before start
+            if start > 0:
+                char_before = doc.Range(start - 1, start).Text
+                log.info("[DEBUG] Character before start: %r (is_word_char: %s)", char_before, is_word_char(char_before))
+            else:
+                char_before = ""
+
+            # Check character at end
+            char_at_end = doc.Range(end, end + 1).Text
+            log.info("[DEBUG] Character after end: %r (is_word_char: %s)", char_at_end, is_word_char(char_at_end))
+
+            expanded = False
+            # Expand start backwards
+            while start > 0:
+                char_before = doc.Range(start - 1, start).Text
+                if is_word_char(char_before):
+                    start -= 1
+                    expanded = True
+                else:
+                    break
+
+            # Expand end forwards
+            while True:
+                char_after = doc.Range(end, end + 1).Text
+                if is_word_char(char_after):
+                    end += 1
+                    expanded = True
+                else:
+                    break
+
+            if expanded:
+                find_range.Start = start
+                find_range.End = end
+                log.info("[DEBUG] Range expanded to: [%d, %d] -> text: %r", start, end, find_range.Text)
+            else:
+                log.info("[DEBUG] No range expansion needed.")
+        except Exception as e:
+            log.debug("[DEBUG] _expand_to_word_boundaries failed: %s", e)
 
