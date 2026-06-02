@@ -1,0 +1,27 @@
+# ── Core UI ───────────────────────────────────────────────────────────────────
+PyQt5>=5.15
+pywin32>=306
+
+# ── LLM ───────────────────────────────────────────────────────────────────────
+requests>=2.31
+ollama>=0.4
+
+# ── Text reading ──────────────────────────────────────────────────────────────
+uiautomation>=2.0
+python-docx>=1.1
+
+# ── Google Calendar ───────────────────────────────────────────────────────────
+google-api-python-client>=2.100
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
+
+# ── Security / encryption ─────────────────────────────────────────────────────
+cryptography>=42.0      # Fernet AES encryption for local secret files
+keyring>=25.0           # Windows Credential Manager (DPAPI-backed)
+
+# ── System / utilities ────────────────────────────────────────────────────────
+psutil>=5.9        # process inspection for app monitor
+tzlocal>=5.0       # local timezone detection for calendar events
+
+# ── Optional: GPU detection ───────────────────────────────────────────────────
+pynvml>=11.5

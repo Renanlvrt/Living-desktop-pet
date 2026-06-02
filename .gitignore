@@ -1,0 +1,73 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# ── IDE & editors ─────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── SECURITY: credentials & tokens — NEVER commit these ──────────────────────
+# Google OAuth2 credentials
+credentials.json
+client_secret*.json
+token.json
+
+# Any file containing API keys or secrets
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+secrets.yaml
+secrets.yml
+config.secret.*
+.env
+.env.*
+*.env
+
+# Encrypted vault files (safe to store locally, but not needed in repo)
+*.enc
+
+# Pikachu local data dir
+.pikachu/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── SQLite caches ─────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── PyInstaller / packaged builds ─────────────────────────────────────────────
+*.spec
+/dist/
+/build/
