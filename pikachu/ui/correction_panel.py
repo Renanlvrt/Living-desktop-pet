@@ -226,7 +226,7 @@ class CorrectionCard(QFrame):
         dismiss_btn.clicked.connect(lambda: self.dismiss_clicked.emit(self.correction))
 
         btn_row.addWidget(show_btn)
-        btn_row.addWidget(apply_btn, 1) # Give apply button stretch
+        btn_row.addWidget(apply_btn)
         btn_row.addWidget(dismiss_btn)
         layout.addLayout(btn_row)
 

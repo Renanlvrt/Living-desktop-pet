@@ -135,6 +135,7 @@ class GrammarOfferCard(_BaseCard):
 
     def __init__(self, app_name: str = "your document", parent=None):
         super().__init__(parent)
+        self.setFixedWidth(400)
         self._build(app_name)
 
     def _build(self, app_name: str):

@@ -40,6 +40,7 @@ CRITICAL RULES:
 - "style" scope is for awkward phrasing.
 - The "error" field MUST contain ONLY the exact incorrect word or phrase from the text. Do not add any parenthetical comments, corrections, explanations, or notes (e.g. NEVER write "a lot" (should be "a lot of")).
 - The "corrected" field MUST contain ONLY the clean replacement word or phrase. Do not add explanations, notes, or commentary.
+- NEVER rewrite or repeat the entire sentence or context in the "corrected" field. Only provide the exact word or phrase that fixes the error. Example: If the error is "They going", the corrected field is "They are going".
 - Output ONLY a valid JSON object. Do not include markdown code blocks (```json).
 
 Format:
