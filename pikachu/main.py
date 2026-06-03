@@ -16,6 +16,7 @@ Module graph:
 import sys
 import ctypes
 import ctypes.wintypes
+import keyboard
 
 from PyQt5.QtWidgets import QApplication, QDialog
 from PyQt5.QtCore    import QTimer
@@ -123,7 +124,29 @@ class PikachuApp:
         # Correction panel actions
         self._panel.apply_correction.connect(self._on_apply_correction)
         self._panel.dismiss_correction.connect(self._on_dismiss_correction)
-        self._panel.closed.connect(lambda: self._grammar.deactivate())
+        self._panel.show_correction.connect(self._on_show_correction)
+        self._panel.closed.connect(self._on_panel_closed)
+
+        # Global Hotkeys
+        try:
+            keyboard.add_hotkey(cfg.SHORTCUT_PROOFREAD, self._on_proofread_shortcut)
+            keyboard.add_hotkey(cfg.SHORTCUT_APPLY_TOP, self._on_apply_top_shortcut)
+            keyboard.add_hotkey(cfg.SHORTCUT_DISMISS_TOP, self._on_dismiss_top_shortcut)
+            log.info("Registered global shortcuts: Proofread=%s, Apply=%s, Dismiss=%s", 
+                     cfg.SHORTCUT_PROOFREAD, cfg.SHORTCUT_APPLY_TOP, cfg.SHORTCUT_DISMISS_TOP)
+        except Exception as e:
+            log.error("Failed to register hotkeys: %s", e)
+
+    def _on_proofread_shortcut(self):
+        log.info("Proofread shortcut triggered!")
+        self._grammar.enqueue_full_proofread()
+
+    def _on_apply_top_shortcut(self):
+        # We must route this back to the main thread via a signal or QTimer because keyboard hooks run in a background thread
+        QTimer.singleShot(0, self._panel.apply_top_card)
+
+    def _on_dismiss_top_shortcut(self):
+        QTimer.singleShot(0, self._panel.dismiss_top_card)
 
     # ── Main tick ─────────────────────────────────────────────────────────────
 
@@ -248,6 +271,16 @@ class PikachuApp:
     def _on_dismiss_correction(self, correction):
         log.info("Dismissed correction: '%s'", correction.original)
         self._grammar.dismiss_correction(correction)
+
+    def _on_show_correction(self, correction):
+        """User clicked Show to jump to the correction in the document."""
+        log.info("Showing correction: %s", correction.original)
+        from pikachu.utils.text_reader import TextReader
+        reader = TextReader()
+        reader.scroll_to_correction(self._current_class_name, correction)
+
+    def _on_panel_closed(self):
+        self._grammar.deactivate()
 
     def _on_big_response(self, text: str, tag: str):
         """Non-grammar response from Mistral (e.g. general query or calendar)."""

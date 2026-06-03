@@ -181,6 +181,7 @@ class GrammarEngine:
         log.info("[DEBUG] Grammar monitoring thread loop started.")
         self._high_gpu_ticks  = 0
         self._pending_paragraphs: List[str] = []
+        self._proofread_queue: List[str]    = []
         self._last_change_time: float       = 0.0
         while self._active:
             try:
@@ -210,11 +211,29 @@ class GrammarEngine:
                 if (self._pending_paragraphs
                         and not self._llm._big_busy
                         and pause_elapsed >= cfg.GRAMMAR_PAUSE_THRESHOLD):
-                    log.info("[DEBUG] Debounce: %.1fs pause detected — sending %d paragraph(s) to Mistral.",
-                             pause_elapsed, len(self._pending_paragraphs))
-                    to_send = list(self._pending_paragraphs)
-                    self._pending_paragraphs = []
-                    self._request_correction(to_send)
+                    
+                    # Hard token limit check
+                    combined_len = sum(len(p) for p in self._pending_paragraphs)
+                    if combined_len > cfg.MAX_CHARS_PER_REQUEST:
+                        log.warning("[DEBUG] Payload size %d exceeds limit %d. Dropping to prevent freeze.", combined_len, cfg.MAX_CHARS_PER_REQUEST)
+                        self._pending_paragraphs = []
+                    else:
+                        log.info("[DEBUG] Debounce: %.1fs pause detected — sending %d paragraph(s) to Mistral.",
+                                 pause_elapsed, len(self._pending_paragraphs))
+                        to_send = list(self._pending_paragraphs)
+                        self._pending_paragraphs = []
+                        self._request_correction(to_send)
+
+                # ── Async Queue Processing ────────────────────────────────────
+                # If we have no real-time typing queued, process the background proofread queue
+                if (not self._pending_paragraphs
+                        and not self._llm._big_busy
+                        and self._proofread_queue):
+                    log.info("[DEBUG] Processing next chunk from proofread queue (%d remaining)...", len(self._proofread_queue))
+                    # Take up to 2 paragraphs from the queue
+                    chunk = self._proofread_queue[:2]
+                    self._proofread_queue = self._proofread_queue[2:]
+                    self._request_correction(chunk)
 
                 # Monitor GPU load to auto-unload if another heavy task is active
                 if not self._llm._big_busy:
@@ -240,6 +259,25 @@ class GrammarEngine:
 
         log.info("[DEBUG] Grammar monitoring thread loop stopped.")
 
+    def enqueue_full_proofread(self):
+        """Called by a keyboard shortcut to queue the entire document for async proofreading."""
+        if not self._active:
+            log.warning("Cannot enqueue proofread: Grammar Engine is not active.")
+            return
+
+        try:
+            import win32com.client
+            word = win32com.client.GetActiveObject("Word.Application")
+            doc  = word.ActiveDocument
+            text = doc.Content.Text
+            if not text:
+                return
+            text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x0b", "\n")
+            paras = [p.strip() for p in text.split("\n") if len(p.strip()) > 10]
+            self._proofread_queue.extend(paras)
+            log.info("Enqueued %d paragraphs for background proofreading.", len(paras))
+        except Exception as e:
+            log.error("Failed to enqueue full document: %s", e)
 
     def _request_correction(self, paragraphs: List[str]):
         """Send changed paragraphs to Mistral for correction."""
@@ -247,6 +285,7 @@ class GrammarEngine:
             return
 
         combined = "\n\n".join(paragraphs)
+        self._last_prompt_text = combined  # save for hallucination checking
         messages = [
             {"role": "system", "content": _GRAMMAR_SYSTEM},
             {"role": "user",   "content": combined},
@@ -327,31 +366,39 @@ class GrammarEngine:
                         continue
 
                     # Filter out hallucinations (Mistral making up text that isn't in the document)
+                    if hasattr(self, '_last_prompt_text'):
+                        context_text = self._last_prompt_text.lower()
+                    else:
+                        context_text = self._last_text.lower()
+
                     if c.error:
-                        if c.error.lower() not in self._last_text.lower():
-                            log.info("[DEBUG] Filtering out hallucinated correction (error %r not found in text)", c.error)
+                        if c.error.lower() not in context_text:
+                            log.info("[DEBUG] Filtering out hallucinated correction (error %r not found in context)", c.error)
                             continue
                     elif c.question:
-                        # For full-sentence replacements, verify the question exists in the text
-                        # We strip punctuation/spaces for a safer check
-                        if self._normalize_text(c.question) not in self._normalize_text(self._last_text):
-                            log.info("[DEBUG] Filtering out hallucinated correction (question %r not found in text)", c.question)
+                        if self._normalize_text(c.question) not in self._normalize_text(context_text):
+                            log.info("[DEBUG] Filtering out hallucinated correction (question %r not found in context)", c.question)
                             continue
 
-                    corrections.append(c)
-                    log.info("[DEBUG] Created Correction (index=%d): %r", self._correction_index, corrections[-1])
-                    self._correction_index += 1
+                    # Prevent duplicate cards
+                    is_dup = False
+                    for existing_c in self._active_corrections:
+                        if existing_c.error == c.error and existing_c.corrected == c.corrected:
+                            is_dup = True
+                            break
+                    if not is_dup:
+                        corrections.append(c)
+                        log.info("[DEBUG] Created Correction (index=%d): %r", self._correction_index, corrections[-1])
+                        self._correction_index += 1
                 else:
                     log.info("[DEBUG] Skipped/filtered empty or identical correction: error=%r, corrected=%r", error, corr)
 
-            # Clear old highlights first
-            self._reader.clear_highlights_in_word(self._class_name, self._active_corrections)
-            self._active_corrections = corrections
+            self._active_corrections.extend(corrections)
 
             if corrections:
-                log.info("Grammar: %d correction(s) found.", len(corrections))
+                log.info("Grammar: %d new correction(s) found. Total active: %d", len(corrections), len(self._active_corrections))
                 # Highlight new corrections in Word
-                self._reader.highlight_corrections_in_word(self._class_name, corrections, color_index=4)
+                self._reader.highlight_corrections_in_word(self._class_name, corrections, color_index=-1)
                 self.signals.correction_ready.emit(corrections)
             else:
                 log.info("[DEBUG] Grammar: no corrections remained after parsing/filtering.")

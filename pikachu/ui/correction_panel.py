@@ -67,6 +67,7 @@ class CorrectionCard(QFrame):
     """
     apply_clicked   = pyqtSignal(object)   # emits the Correction
     dismiss_clicked = pyqtSignal(object)
+    show_clicked    = pyqtSignal(object)
 
     def __init__(self, correction: Correction, parent=None):
         super().__init__(parent)
@@ -91,45 +92,38 @@ class CorrectionCard(QFrame):
         font_bold = QFont(cfg.FONT_FAMILY, 9, QFont.Bold)
         font_small_bold = QFont(cfg.FONT_FAMILY, 8, QFont.Bold)
 
-        # ── Scope Badge ───────────────────────────────────────────────────────
-        scope_text = self.correction.scope.upper()
-        if scope_text == "SPELLING":
-            badge_color = "#FF4500"  # Orange-red
-            badge_bg = "rgba(255, 69, 0, 0.15)"
-        elif scope_text == "GRAMMAR":
-            badge_color = "#1E90FF"  # Dodger blue
-            badge_bg = "rgba(30, 144, 255, 0.15)"
-        else:
-            badge_color = "#32CD32"  # Lime green
-            badge_bg = "rgba(50, 205, 50, 0.15)"
+        # ── Header ────────────────────────────────────────────────────────────
+        header_lbl = QLabel(f"✏️ {self.correction.scope.title()} Suggestion")
+        header_lbl.setFont(font_small_bold)
+        header_lbl.setStyleSheet(f"color: {themes.PANEL_DIM}; background: transparent;")
+        layout.addWidget(header_lbl)
+        
+        question_text = self.correction.question
+        error_text = self.correction.error
 
-        badge = QLabel(f"  {scope_text}  ")
-        badge.setFont(font_small_bold)
-        badge.setStyleSheet(f"""
-            color: {badge_color};
-            background-color: {badge_bg};
-            border-radius: 4px;
-            padding: 2px;
-        """)
-        badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        layout.addWidget(badge)
-
-        # ── Original (wrong) ── (Only if not style)
-        if scope_text != "STYLE":
+        # ── Original (wrong) ──────────────────────────────────────────────────
+        if self.correction.scope != "style":
             orig_row = QHBoxLayout()
-            orig_label = QLabel("✗")
+            orig_label = QLabel("●")
             orig_label.setFont(font_bold)
             orig_label.setStyleSheet(f"color: {themes.PANEL_ERROR_FG}; background: transparent;")
             orig_label.setFixedWidth(16)
-
-            orig_text = QLabel(f'"{self.correction.error}"')
+            orig_label.setAlignment(Qt.AlignTop)
+            
+            if error_text and error_text in question_text:
+                # Use HTML to underline just the error
+                styled_q = question_text.replace(
+                    error_text, 
+                    f'<u style="text-decoration-color: {themes.PANEL_ERROR_FG};">{error_text}</u>'
+                )
+            else:
+                styled_q = question_text
+                
+            orig_text = QLabel(styled_q)
             orig_text.setFont(font_body)
-            orig_text.setStyleSheet(
-                f"color: {themes.PANEL_ERROR_FG}; background: transparent;"
-                f"text-decoration: line-through;"
-            )
+            orig_text.setStyleSheet(f"color: {themes.PANEL_BODY_FG}; background: transparent;")
             orig_text.setWordWrap(True)
-
+            
             orig_row.addWidget(orig_label)
             orig_row.addWidget(orig_text, 1)
             layout.addLayout(orig_row)
@@ -140,16 +134,23 @@ class CorrectionCard(QFrame):
         fix_label.setFont(font_bold)
         fix_label.setStyleSheet(f"color: {themes.PANEL_OK_FG}; background: transparent;")
         fix_label.setFixedWidth(16)
+        fix_label.setAlignment(Qt.AlignTop)
 
-        if scope_text == "STYLE":
-            fix_text = QLabel(f'You can say this instead:\n"{self.correction.corrected}"')
+        if self.correction.scope == "style":
+            styled_fix = f'You can say this instead:\n{self.correction.corrected}'
+            fix_color = themes.PANEL_OK_FG
         else:
-            fix_text = QLabel(f'"{self.correction.corrected}"')
+            if error_text and error_text in question_text:
+                styled_fix = question_text.replace(error_text, self.correction.corrected)
+            else:
+                styled_fix = self.correction.corrected
+            fix_color = themes.PANEL_OK_FG
             
-        fix_text.setFont(font_bold)
-        fix_text.setStyleSheet(f"color: {themes.PANEL_OK_FG}; background: transparent;")
+        fix_text = QLabel(styled_fix)
+        fix_text.setFont(font_body)
+        fix_text.setStyleSheet(f"color: {fix_color}; background: transparent;")
         fix_text.setWordWrap(True)
-
+        
         fix_row.addWidget(fix_label)
         fix_row.addWidget(fix_text, 1)
         layout.addLayout(fix_row)
@@ -166,16 +167,16 @@ class CorrectionCard(QFrame):
                     text-align: left;
                     font-size: 11px;
                     padding: 0;
+                    font-weight: bold;
                 }}
                 QPushButton:hover {{
-                    text-decoration: underline;
                     color: {themes.PANEL_TITLE_FG};
                 }}
             """)
             
             self.exp_lbl = QLabel(self.correction.explanation)
             self.exp_lbl.setFont(QFont(cfg.FONT_FAMILY, 8))
-            self.exp_lbl.setStyleSheet(f"color: {themes.PANEL_DIM}; background: transparent; padding-left: 10px;")
+            self.exp_lbl.setStyleSheet(f"color: {themes.PANEL_BODY_FG}; background: transparent; padding-left: 10px;")
             self.exp_lbl.setWordWrap(True)
             self.exp_lbl.setVisible(False)
             
@@ -198,26 +199,34 @@ class CorrectionCard(QFrame):
 
         # ── Buttons ───────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
+        btn_row.setSpacing(8)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setFixedHeight(28)
+        show_btn = QPushButton("Show")
+        show_btn.setFixedHeight(30)
+        show_btn.setCursor(Qt.PointingHandCursor)
+        show_btn.setStyleSheet(themes.btn_style(
+            themes.BTN_DIM_BG, themes.BTN_DIM_FG, themes.BTN_DIM_HOVER, radius=6
+        ))
+        show_btn.clicked.connect(lambda: self.show_clicked.emit(self.correction))
+
+        apply_btn = QPushButton("✓ Apply")
+        apply_btn.setFixedHeight(30)
         apply_btn.setCursor(Qt.PointingHandCursor)
         apply_btn.setStyleSheet(themes.btn_style(
-            themes.BTN_APPLY_BG, themes.BTN_APPLY_FG, themes.BTN_APPLY_HOVER, radius=8
+            themes.BTN_APPLY_BG, themes.BTN_APPLY_FG, themes.BTN_APPLY_HOVER, radius=6
         ))
         apply_btn.clicked.connect(lambda: self.apply_clicked.emit(self.correction))
 
-        dismiss_btn = QPushButton("Dismiss")
-        dismiss_btn.setFixedHeight(28)
+        dismiss_btn = QPushButton("✕ Dismiss")
+        dismiss_btn.setFixedHeight(30)
         dismiss_btn.setCursor(Qt.PointingHandCursor)
         dismiss_btn.setStyleSheet(themes.btn_style(
-            themes.BTN_DIM_BG, themes.BTN_DIM_FG, themes.BTN_DIM_HOVER, radius=8
+            themes.BTN_DIM_BG, themes.BTN_DIM_FG, themes.BTN_DIM_HOVER, radius=6
         ))
         dismiss_btn.clicked.connect(lambda: self.dismiss_clicked.emit(self.correction))
 
-        btn_row.addStretch()
-        btn_row.addWidget(apply_btn)
+        btn_row.addWidget(show_btn)
+        btn_row.addWidget(apply_btn, 1) # Give apply button stretch
         btn_row.addWidget(dismiss_btn)
         layout.addLayout(btn_row)
 
@@ -235,9 +244,10 @@ class CorrectionPanel(QWidget):
     """
     apply_correction   = pyqtSignal(object)
     dismiss_correction = pyqtSignal(object)
+    show_correction    = pyqtSignal(object)
     closed             = pyqtSignal()
 
-    _PANEL_WIDTH  = 320
+    _PANEL_WIDTH  = 420
     _PANEL_MAX_H  = 600
 
     def __init__(self, screen_w: int, screen_h: int):
@@ -314,10 +324,10 @@ class CorrectionPanel(QWidget):
         header.setContentsMargins(14, 12, 10, 12)
 
         icon = QLabel("⚡")
-        icon.setFont(QFont(cfg.FONT_FAMILY, 13))
-        icon.setStyleSheet("background: transparent; color: #FFD700;")
+        icon.setFont(QFont(cfg.FONT_FAMILY, 11))
+        icon.setStyleSheet("background: transparent; color: #88C0D0;")
 
-        title = QLabel("Pikachu's Grammar Notes")
+        title = QLabel("Grammar Assistant")
         title.setFont(QFont(cfg.FONT_FAMILY, 10, QFont.Bold))
         title.setStyleSheet(f"color: {themes.PANEL_TITLE_FG}; background: transparent;")
 
@@ -352,28 +362,35 @@ class CorrectionPanel(QWidget):
 
     def show_corrections(self, corrections: List[Correction], window_rect=None):
         """
-        Populate the panel with a new list of corrections and show it.
-
-        Args:
-            corrections: List of Correction dataclasses from GrammarEngine.
-            window_rect: (l, t, r, b) of the active writing app window,
-                         used to position the panel. None → right edge of screen.
+        Populate the panel with new corrections, appending them without clearing old ones.
         """
-        self._clear_cards()
-
         if not corrections:
-            self.hide()
             return
 
         for c in corrections:
-            card = CorrectionCard(c)
-            card.apply_clicked.connect(self._on_apply)
-            card.dismiss_clicked.connect(self._on_dismiss)
-            # Insert before the trailing stretch
-            self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
+            # Check for duplicates by index
+            exists = False
+            for i in range(self._cards_layout.count()):
+                item = self._cards_layout.itemAt(i)
+                if item and isinstance(item.widget(), CorrectionCard):
+                    if item.widget().correction.index == c.index:
+                        exists = True
+                        break
+            if not exists:
+                card = CorrectionCard(c)
+                card.apply_clicked.connect(self._on_apply)
+                card.dismiss_clicked.connect(self._on_dismiss)
+                card.show_clicked.connect(self._on_show)
+                # Insert before the trailing stretch
+                self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
 
-        self._count_lbl.setText(f"{len(corrections)} issue{'s' if len(corrections) != 1 else ''}")
+        remaining = sum(
+            1 for i in range(self._cards_layout.count())
+            if isinstance(self._cards_layout.itemAt(i).widget() if self._cards_layout.itemAt(i) else None, CorrectionCard)
+        )
+        self._count_lbl.setText(f"{remaining} issue{'s' if remaining != 1 else ''}")
         self._reposition(window_rect)
+        self.show()
         self._animate_in()
 
     def clear(self):
@@ -412,6 +429,24 @@ class CorrectionPanel(QWidget):
         else:
             self._count_lbl.setText(f"{remaining} issue{'s' if remaining != 1 else ''}")
 
+    def apply_top_card(self):
+        """Apply the top-most visible correction card (triggered via hotkey)."""
+        for i in range(self._cards_layout.count()):
+            item = self._cards_layout.itemAt(i)
+            if item and isinstance(item.widget(), CorrectionCard) and item.widget().isVisible():
+                card: CorrectionCard = item.widget()
+                card._on_apply()
+                break
+
+    def dismiss_top_card(self):
+        """Dismiss the top-most visible correction card (triggered via hotkey)."""
+        for i in range(self._cards_layout.count()):
+            item = self._cards_layout.itemAt(i)
+            if item and isinstance(item.widget(), CorrectionCard) and item.widget().isVisible():
+                card: CorrectionCard = item.widget()
+                card._on_dismiss()
+                break
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _clear_cards(self):
@@ -449,14 +484,15 @@ class CorrectionPanel(QWidget):
         self._anim = anim   # keep reference
 
     def _on_apply(self, correction: Correction):
-        log.info("Apply correction: '%s' → '%s'", correction.original, correction.corrected)
-        self.apply_correction.emit(correction)
         self.remove_card(correction)
+        self.apply_correction.emit(correction)
 
     def _on_dismiss(self, correction: Correction):
-        log.info("Dismiss correction: '%s'", correction.original)
-        self.dismiss_correction.emit(correction)
         self.remove_card(correction)
+        self.dismiss_correction.emit(correction)
+
+    def _on_show(self, correction: Correction):
+        self.show_correction.emit(correction)
 
     def _on_close(self):
         self.hide()

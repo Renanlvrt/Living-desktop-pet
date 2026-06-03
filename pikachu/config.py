@@ -56,12 +56,15 @@ TYPE_SPEED       = 2       # ticks between typewriter characters
 BUBBLE_MAX_WIDTH = 200     # px
 
 # ── Grammar ───────────────────────────────────────────────────────────────────
-GRAMMAR_POLL_INTERVAL_S = 5   # seconds between text snapshots
-GRAMMAR_PAUSE_THRESHOLD = 3   # seconds of no change before suggesting
+GRAMMAR_POLL_INTERVAL_S = 3.0   # seconds between text snapshots (increased to prevent Word UI stutter)
+GRAMMAR_PAUSE_THRESHOLD = 2.5   # seconds of no change before suggesting
 
 # Which correction scopes to show the user.
 # Remove "style" if you want only hard errors (spelling + grammar).
 GRAMMAR_ENABLED_SCOPES  = {"spelling", "grammar", "style"}
+
+# Limit payload size to prevent freezing the LLM on massive pastes
+MAX_CHARS_PER_REQUEST   = 1500
 
 # ── App detection ─────────────────────────────────────────────────────────────
 # Maps Windows class names → friendly names for known writing apps
@@ -82,7 +85,10 @@ DESKTOP_CLASSES = {
 }
 
 # ── Shortcuts ────────────────────────────────────────────────────────────────
-SHORTCUT_GRAMMAR_TOGGLE = "ctrl+shift+p"   # toggle grammar mode
+SHORTCUT_GRAMMAR_TOGGLE = "ctrl+shift+p"   # toggle real-time grammar mode
+SHORTCUT_PROOFREAD      = "ctrl+shift+o"   # enqueue full document proofread
+SHORTCUT_APPLY_TOP      = "alt+a"          # apply top correction card
+SHORTCUT_DISMISS_TOP    = "alt+d"          # dismiss top correction card
 
 # ── Google Calendar ───────────────────────────────────────────────────────────
 CALENDAR_SCOPES     = ["https://www.googleapis.com/auth/calendar"]
