@@ -249,10 +249,12 @@ class PikachuApp:
         log.info("Dismissed correction: '%s'", correction.original)
         self._grammar.dismiss_correction(correction)
 
-    def _on_big_response(self, text: str):
-        """Non-tool response from Mistral (e.g. general query)."""
-        if self._grammar.is_active:
-            return  # The grammar engine is handling this response; don't show it as a chat bubble.
+    def _on_big_response(self, text: str, tag: str):
+        """Non-grammar response from Mistral (e.g. general query or calendar)."""
+        # Grammar responses are handled exclusively by GrammarEngine._on_llm_response
+        # via tag routing — we only show non-grammar content in the chat bubble.
+        if tag == "grammar":
+            return
         self._bubble.show_text(text[:80])
 
     def _on_tool_call(self, tool_name: str, args: dict):

@@ -129,10 +129,35 @@ Output:
 Now parse the user's scheduling request and return the JSON object."""
 
 
+# ── JSON schema enforced at Ollama logit level for grammar responses ─────────
+# Requires Ollama ≥ 0.5.0 (structured outputs). With 0.30.0+ this guarantees
+# the model physically cannot emit invalid JSON or wrong field names.
+_GRAMMAR_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "corrections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question":    {"type": "string"},
+                    "scope":       {"type": "string", "enum": ["spelling", "grammar", "style"]},
+                    "error":       {"type": "string"},
+                    "corrected":   {"type": "string"},
+                    "explanation": {"type": "string"}
+                },
+                "required": ["question", "scope", "error", "corrected", "explanation"]
+            }
+        }
+    },
+    "required": ["corrections"]
+}
+
+
 class LLMSignals(QObject):
     """Qt signals emitted from background threads back to the main thread."""
-    tiny_response_ready = pyqtSignal(str)   # cute chat bubble text
-    big_response_ready  = pyqtSignal(str)   # grammar / long response text
+    tiny_response_ready = pyqtSignal(str)        # cute chat bubble text
+    big_response_ready  = pyqtSignal(str, str)   # (response_text, tag)
     tool_call_ready     = pyqtSignal(str, dict)  # (tool_name, arguments)
     error               = pyqtSignal(str)
 
@@ -212,13 +237,15 @@ class LLMEngine:
             target=self._run_tiny, args=(messages,), daemon=True
         ).start()
 
-    def ask_big(self, messages: list, tools: list = None):
+    def ask_big(self, messages: list, tools: list = None, tag: str = ""):
         """
         Ask the big model.  Used for grammar correction and tool calling.
 
         Args:
             messages: List of {"role": ..., "content": ...} dicts.
             tools:    Optional list of OpenAI-format tool definitions.
+            tag:      Routing tag emitted with the response (e.g. "grammar").
+                      Use this to distinguish grammar responses from chat responses.
         """
         if not self.can_use_big_model:
             log.warning("Big model requested but GPU tier is 'none' — skipping")
@@ -229,7 +256,7 @@ class LLMEngine:
             return
         self._big_busy = True
         threading.Thread(
-            target=self._run_big, args=(messages, tools), daemon=True
+            target=self._run_big, args=(messages, tools, tag), daemon=True
         ).start()
 
     def load_big_model(self):
@@ -320,8 +347,8 @@ class LLMEngine:
         except Exception as e:
             log.warning("Could not unload big model: %s", e)
 
-    def _run_big(self, messages: list, tools: list):
-        """Run a /api/chat request with optional tool definitions."""
+    def _run_big(self, messages: list, tools: list, tag: str = ""):
+        """Run a /api/chat request with optional tool definitions and routing tag."""
         payload = {
             "model":      self.big_model,
             "messages":   messages,
@@ -331,6 +358,10 @@ class LLMEngine:
         }
         if tools:
             payload["tools"] = tools
+        # Grammar calls use Ollama structured outputs (Ollama ≥ 0.5.0):
+        # The model is physically constrained to emit schema-valid JSON.
+        if tag == "grammar":
+            payload["format"] = _GRAMMAR_RESPONSE_SCHEMA
 
         log.debug("=== [DEBUG] BIG LLM REQUEST PAYLOAD ===")
         log.debug(json.dumps(payload, indent=2))
@@ -343,7 +374,7 @@ class LLMEngine:
                 timeout=60,
             )
             data    = resp.json()
-            
+
             log.debug("=== [DEBUG] BIG LLM RESPONSE PAYLOAD ===")
             log.debug(json.dumps(data, indent=2))
             log.debug("========================================")
@@ -367,7 +398,8 @@ class LLMEngine:
             else:
                 # ── Normal text path ──────────────────────────────────────
                 content = message.get("content", "").strip()
-                self.signals.big_response_ready.emit(content)
+                # Emit with tag so consumers can route grammar vs chat responses
+                self.signals.big_response_ready.emit(content, tag)
 
         except Exception as e:
             log.error("Big LLM error: %s", e)

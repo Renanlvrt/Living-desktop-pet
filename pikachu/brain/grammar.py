@@ -86,8 +86,9 @@ class GrammarEngine:
         self._high_gpu_ticks   = 0
         self._active_corrections = []
         self._dismissed_signatures = set()
+        self._blocked_reversals = set()
 
-        # Wire up LLM response → our handler
+        # Wire up LLM response → our handler (tag-routed: only accept "grammar" responses)
         self._llm.signals.big_response_ready.connect(self._on_llm_response)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -140,6 +141,15 @@ class GrammarEngine:
         """Replace text in the active document for the given correction."""
         # Remove from active tracking first so we don't try to clear highlight for it again
         self._active_corrections = [c for c in self._active_corrections if c.index != correction.index]
+        
+        # Block the reverse of this correction from being suggested again in this session
+        rev_sig = (
+            correction.corrected.strip().lower(),
+            correction.error.strip().lower()
+        )
+        self._blocked_reversals.add(rev_sig)
+        log.info("[DEBUG] Added reverse correction to blocked reversals: %s", rev_sig)
+        
         return self._reader.replace_text_in_active_app(
             class_name = self._class_name,
             original   = correction.error,
@@ -169,7 +179,9 @@ class GrammarEngine:
 
     def _poll_loop(self):
         log.info("[DEBUG] Grammar monitoring thread loop started.")
-        self._high_gpu_ticks = 0
+        self._high_gpu_ticks  = 0
+        self._pending_paragraphs: List[str] = []
+        self._last_change_time: float       = 0.0
         while self._active:
             try:
                 current_text = self._reader.read_active_app(self._class_name)
@@ -184,8 +196,25 @@ class GrammarEngine:
                 changed = TextReader.get_changed_paragraphs(self._last_text, current_text)
                 if changed:
                     log.info("[DEBUG] Paragraph diff detected changes: %s", changed)
-                    self._last_text = current_text
-                    self._request_correction(changed)
+                    self._last_text        = current_text
+                    # Merge new changed paragraphs into the pending queue, deduplicating
+                    for p in changed:
+                        if p not in self._pending_paragraphs:
+                            self._pending_paragraphs.append(p)
+                    self._last_change_time = time.time()
+                    log.info("[DEBUG] Debounce: queued %d paragraph(s), waiting for pause...",
+                             len(self._pending_paragraphs))
+
+                # ── Debounce gate: only send after user has stopped typing ────
+                pause_elapsed = time.time() - self._last_change_time
+                if (self._pending_paragraphs
+                        and not self._llm._big_busy
+                        and pause_elapsed >= cfg.GRAMMAR_PAUSE_THRESHOLD):
+                    log.info("[DEBUG] Debounce: %.1fs pause detected — sending %d paragraph(s) to Mistral.",
+                             pause_elapsed, len(self._pending_paragraphs))
+                    to_send = list(self._pending_paragraphs)
+                    self._pending_paragraphs = []
+                    self._request_correction(to_send)
 
                 # Monitor GPU load to auto-unload if another heavy task is active
                 if not self._llm._big_busy:
@@ -211,6 +240,7 @@ class GrammarEngine:
 
         log.info("[DEBUG] Grammar monitoring thread loop stopped.")
 
+
     def _request_correction(self, paragraphs: List[str]):
         """Send changed paragraphs to Mistral for correction."""
         if not paragraphs:
@@ -224,27 +254,30 @@ class GrammarEngine:
         log.info("[DEBUG] Sending prompt to Mistral.")
         log.info("[DEBUG] Prompt payload system message: %s", _GRAMMAR_SYSTEM)
         log.info("[DEBUG] Prompt payload user text to check:\n%s", combined)
-        self._llm.ask_big(messages)
+        # tag="grammar" enables Ollama structured outputs (schema-constrained JSON)
+        # and routes the response back exclusively to _on_llm_response
+        self._llm.ask_big(messages, tag="grammar")
 
     # ── LLM response handler ──────────────────────────────────────────────────
 
-    def _on_llm_response(self, text: str):
+    def _on_llm_response(self, text: str, tag: str):
         """Parse Mistral's JSON response and emit corrections."""
+        # Only handle responses routed to us via the 'grammar' tag
+        if tag != "grammar":
+            return
         if not self._active:
             return
         log.info("[DEBUG] Raw response received from Mistral:\n%s", text)
         try:
+            # With Ollama structured outputs the response is clean JSON.
+            # We keep the {} extractor as a belt-and-suspenders guard for
+            # older Ollama versions that might still include whitespace padding.
             start_idx = text.find('{')
-            end_idx = text.rfind('}')
-            
+            end_idx   = text.rfind('}')
             if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
                 cleaned = text[start_idx : end_idx + 1]
             else:
                 raise ValueError("No JSON object found in response.")
-
-            # Sanitize common Mistral JSON syntax issues (e.g. "a lot" (should be "a lot of") -> "a lot")
-            import re
-            cleaned = re.sub(r'("[^"]*")\s*\([^)]*\)', r'\1', cleaned)
 
             log.info("[DEBUG] Cleaned JSON payload extracted: %s", cleaned)
             data        = json.loads(cleaned)
@@ -268,8 +301,13 @@ class GrammarEngine:
                         explanation = expl,
                         index       = self._correction_index,
                     )
-                    
-                    # Filter out if already dismissed in this session
+
+                    # ── Filter: scope not enabled by user config ──────────────────
+                    if scope not in cfg.GRAMMAR_ENABLED_SCOPES:
+                        log.info("[DEBUG] Skipping correction with disabled scope '%s'", scope)
+                        continue
+
+                    # ── Filter: previously dismissed in this session ────────────
                     sig = (
                         c.error.strip().lower(),
                         c.corrected.strip().lower(),
@@ -278,6 +316,27 @@ class GrammarEngine:
                     if sig in self._dismissed_signatures:
                         log.info("[DEBUG] Filtering out dismissed correction: %s", sig)
                         continue
+
+                    # Filter out flip-flops (reversals of previously accepted corrections)
+                    rev_check = (
+                        c.error.strip().lower(),
+                        c.corrected.strip().lower()
+                    )
+                    if rev_check in self._blocked_reversals:
+                        log.info("[DEBUG] Filtering out reversed correction (flip-flop prevented): %s", rev_check)
+                        continue
+
+                    # Filter out hallucinations (Mistral making up text that isn't in the document)
+                    if c.error:
+                        if c.error.lower() not in self._last_text.lower():
+                            log.info("[DEBUG] Filtering out hallucinated correction (error %r not found in text)", c.error)
+                            continue
+                    elif c.question:
+                        # For full-sentence replacements, verify the question exists in the text
+                        # We strip punctuation/spaces for a safer check
+                        if self._normalize_text(c.question) not in self._normalize_text(self._last_text):
+                            log.info("[DEBUG] Filtering out hallucinated correction (question %r not found in text)", c.question)
+                            continue
 
                     corrections.append(c)
                     log.info("[DEBUG] Created Correction (index=%d): %r", self._correction_index, corrections[-1])

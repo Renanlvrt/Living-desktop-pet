@@ -59,6 +59,10 @@ BUBBLE_MAX_WIDTH = 200     # px
 GRAMMAR_POLL_INTERVAL_S = 5   # seconds between text snapshots
 GRAMMAR_PAUSE_THRESHOLD = 3   # seconds of no change before suggesting
 
+# Which correction scopes to show the user.
+# Remove "style" if you want only hard errors (spelling + grammar).
+GRAMMAR_ENABLED_SCOPES  = {"spelling", "grammar", "style"}
+
 # ── App detection ─────────────────────────────────────────────────────────────
 # Maps Windows class names → friendly names for known writing apps
 WRITING_APPS = {

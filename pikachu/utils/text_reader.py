@@ -15,12 +15,35 @@ the same APIs used by screen readers and accessibility tools.
 """
 
 import difflib
+import unicodedata
 from typing import Optional, List
 
 from pikachu.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _normalize_for_search(text: str) -> str:
+    """
+    NFKC-normalize text and map smart-quote/dash variants to ASCII.
+
+    MS Word stores text with typographical (curly) quotes (U+2018, U+2019, U+201C,
+    U+201D) and em-dashes (U+2014). Local LLMs normalise these to straight ASCII
+    quotes / hyphens. Without this step, Find.Execute silently fails because the
+    search string literally does not match the document characters.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    for src, dst in [
+        ("\u2018", "'"),  # left  single quote  → apostrophe
+        ("\u2019", "'"),  # right single quote  → apostrophe
+        ("\u201C", '"'),  # left  double quote  → straight quote
+        ("\u201D", '"'),  # right double quote  → straight quote
+        ("\u2013", "-"),  # en-dash             → hyphen
+        ("\u2014", "-"),  # em-dash             → hyphen
+        ("\u200B", ""),   # zero-width space    → remove
+    ]:
+        text = text.replace(src, dst)
+    return text
 
 class TextReader:
     """
@@ -124,36 +147,46 @@ class TextReader:
             doc  = word.ActiveDocument
             log.info("[DEBUG] replace_text_in_active_app called: original=%r, corrected=%r, question=%r", original, corrected, question)
 
-            # 1. Try to find the sentence context first to avoid wrong replacements
+            # ── Stale context guard ────────────────────────────────────────────
+            # Re-read Word right now (not the cached snapshot). If the error
+            # no longer exists the user deleted/corrected it while Mistral ran.
+            if original:
+                current_doc_text = doc.Content.Text or ""
+                if _normalize_for_search(original) not in _normalize_for_search(current_doc_text):
+                    log.warning("Stale context: error %r no longer exists in document. Aborting.", original)
+                    return False
+
+            # ── Phase 1: Sentence-context-scoped search ────────────────────────
+            # Locate the exact sentence first, then search within that narrow
+            # range for the error word. Prevents replacing the same word in the
+            # wrong paragraph.
             if question:
-                # Normalize line endings/spaces to match Word format
-                clean_q = question.strip().replace("\n", "\r")
+                clean_q = _normalize_for_search(question.strip().replace("\n", "\r"))
                 find_range = doc.Content
                 find_obj = find_range.Find
                 find_obj.ClearFormatting()
                 find_obj.Text = clean_q
                 find_obj.MatchCase = False
-                find_obj.MatchWholeWord = False
+                find_obj.MatchWholeWord = False   # must be False for multi-word phrase
                 find_obj.MatchWildcards = False
 
                 log.info("[DEBUG] Searching for sentence context: %r", clean_q)
                 if find_obj.Execute():
                     log.info("[DEBUG] Found sentence context range: [%d, %d] -> text: %r", find_range.Start, find_range.End, find_range.Text)
-                    # If the sentence range was found, replace within that range
                     if original:
                         error_find = find_range.Find
                         error_find.ClearFormatting()
-                        error_find.Text = original.strip()
+                        error_find.Text = _normalize_for_search(original.strip())
                         error_find.MatchCase = True
+                        error_find.MatchWholeWord = True    # native boundary guard
                         log.info("[DEBUG] Searching for error word %r within sentence context", original.strip())
                         if error_find.Execute():
                             log.info("[DEBUG] Found error word match range: [%d, %d] -> text: %r", find_range.Start, find_range.End, find_range.Text)
                             self._expand_to_word_boundaries(doc, find_range)
-                            # Clear highlight of error range before replacement
-                            find_range.HighlightColorIndex = 0 # wdNoHighlight
+                            find_range.HighlightColorIndex = 0
                             old_text = find_range.Text
                             find_range.Text = corrected.strip()
-                            find_range.HighlightColorIndex = 0 # Ensure replaced text is clean
+                            find_range.HighlightColorIndex = 0
                             log.info("Successfully replaced %r with %r (original error was %r) in Word sentence context.", old_text, corrected, original)
                             return True
                         else:
@@ -161,7 +194,7 @@ class TextReader:
                     else:
                         # Style correction: replace the entire sentence range
                         log.info("[DEBUG] Style correction: replacing entire sentence range")
-                        find_range.HighlightColorIndex = 0 # wdNoHighlight
+                        find_range.HighlightColorIndex = 0
                         find_range.Text = corrected.strip()
                         find_range.HighlightColorIndex = 0
                         log.info("Successfully replaced entire sentence for style in Word.")
@@ -169,18 +202,21 @@ class TextReader:
                 else:
                     log.info("[DEBUG] Sentence context %r not found in document.", clean_q)
 
-            # 2. Global fallback search for the original word/phrase
+            # ── Phase 2: Global fallback search ───────────────────────────────
+            # Sentence context was not found (user edited it). Fall back to a
+            # document-wide search with MatchWholeWord to avoid sub-word matches.
             if original:
                 log.info("[DEBUG] Falling back to global search for error word: %r", original.strip())
                 global_range = doc.Content
                 global_find = global_range.Find
                 global_find.ClearFormatting()
-                global_find.Text = original.strip()
+                global_find.Text = _normalize_for_search(original.strip())
                 global_find.MatchCase = True
+                global_find.MatchWholeWord = True    # native boundary guard
                 if global_find.Execute():
                     log.info("[DEBUG] Found global error word match range: [%d, %d] -> text: %r", global_range.Start, global_range.End, global_range.Text)
                     self._expand_to_word_boundaries(doc, global_range)
-                    global_range.HighlightColorIndex = 0 # wdNoHighlight
+                    global_range.HighlightColorIndex = 0
                     old_text = global_range.Text
                     global_range.Text = corrected.strip()
                     global_range.HighlightColorIndex = 0
